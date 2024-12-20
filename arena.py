@@ -6,7 +6,7 @@ import instructor
 from openai import OpenAI
 from anthropic import Anthropic
 import google.generativeai as genai
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 import re
 import time
 import sqlite3
@@ -217,49 +217,64 @@ class DebateArena:
         topic: DebateTopic,
         position: Position,
         previous_arguments: Optional[List[DebateArgument]] = None,
+        max_retries=3,
     ) -> DebateArgument:
         client, model_name = model
         last_argument = previous_arguments[0] if previous_arguments else None
 
         context = f"""Topic: {topic.topic}
-        Your position: {position.value}
-        Context: {topic.context}
-        {'Pro position: ' + topic.pro_position if position == Position.PRO else 'Con position: ' + topic.con_position}
-        
-        """
+            Your position: {position.value}
+            Context: {topic.context}
+            {'Pro position: ' + topic.pro_position if position == Position.PRO else 'Con position: ' + topic.con_position}
+            
+            """
         if last_argument:
             context += f"""
-        The opposing side's last argument was:
-        {last_argument.argument}
-        
-        Craft a detailed and comprehensive argument in support of your position that directly responds to the opposition’s last argument.
-        Your argument should be well-reasoned, and include supporting key points, and anticipated counter arguments to the last point made by your opponent.
-        """
+            The opposing side's last argument was:
+            {last_argument.argument}
+            
+            Craft a detailed and comprehensive argument in support of your position that directly responds to the opposition’s last argument.
+            Your argument should be well-reasoned, and include supporting key points, and anticipated counter arguments to the last point made by your opponent.
+            """
         else:
             context += """
-        Provide a detailed and comprehensive argument in support of your position.
-        Your argument should be well-reasoned, and include supporting key points, and anticipated counter arguments to your position.
-        """
+            Provide a detailed and comprehensive argument in support of your position.
+            Your argument should be well-reasoned, and include supporting key points, and anticipated counter arguments to your position.
+            """
 
-        context += """
-        Provide your response in the following format:
-        {{
-            "position": "{position.value}",
-            "argument": "Your main argument. It should be very comprehensive",
-            "key_points": ["Point 1", "Point 2", "Point 3"],
-            "counter_arguments": ["Anticipated counter 1", "Anticipated counter 2"]
-        }}
-        """
+        context += f"""
+            Provide your response in the following format:
+            {{
+                "position": "{position.value}",
+                "argument": "Your main argument. It should be very comprehensive",
+                "key_points": ["Point 1", "Point 2", "Point 3"],
+                "counter_arguments": ["Anticipated counter 1", "Anticipated counter 2"]
+            }}
+            """
 
-        response = self._create_completion(
-            client,
-            model_name,
-            [{"role": "user", "content": context}],
-            DebateArgument,  # Changed BaseModel to DebateArgument
-            is_json=True,
-        )
-
-        return response
+        for attempt in range(max_retries):
+            try:
+                response = self._create_completion(
+                    client,
+                    model_name,
+                    [{"role": "user", "content": context}],
+                    DebateArgument,
+                    is_json=True,
+                )
+                response.position = (
+                    position  # overwrite the LLM response as it could be wrong still
+                )
+                return response
+            except ValidationError as e:
+                if attempt < max_retries - 1:  # Don't wait on the last attempt
+                    wait_time = 2**attempt  # Exponential backoff
+                    print(f"Validation Error: {e}. Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                else:
+                    print(
+                        f"Validation Error: {e}. Max retries exceeded. Failed to create argument."
+                    )
+                    raise  # re-raise the error for logging
 
     def judge_debate(
         self,
