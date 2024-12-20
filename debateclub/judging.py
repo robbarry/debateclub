@@ -9,6 +9,7 @@ from debateclub.models import (
 )
 from debateclub.llms import load_all_models
 from pydantic import ValidationError
+import re
 
 
 models = load_all_models()
@@ -54,12 +55,14 @@ def judge_debate(
         JudgmentExtraction,
     )
     # transform dict to tuple.
-    extraction.pro_claims = [
-        (item["claim"], item["reasoning"]) for item in extraction.pro_claims
-    ]
-    extraction.con_claims = [
-        (item["claim"], item["reasoning"]) for item in extraction.con_claims
-    ]
+    if extraction.pro_claims:
+        extraction.pro_claims = [
+            (item["claim"], item["reasoning"]) for item in extraction.pro_claims
+        ]
+    if extraction.con_claims:
+        extraction.con_claims = [
+            (item["claim"], item["reasoning"]) for item in extraction.con_claims
+        ]
 
     scoring_prompt = f"""
     Based on the extracted information:
@@ -176,7 +179,9 @@ def _create_completion(
 
     # Basic sanitization of the response
     if isinstance(response_text, str):
-        text = "".join(ch for ch in response_text if 0x20 <= ord(ch) < 0x10000)
+        # Remove code blocks
+        text = re.sub(r"```json\s*(.*?)\s*```", r"\1", response_text, flags=re.DOTALL)
+        text = "".join(ch for ch in text if 0x20 <= ord(ch) < 0x10000)
     elif hasattr(response_text, "model_dump_json"):  # Handle Pydantic models
         text = response_text.model_dump_json()
     else:

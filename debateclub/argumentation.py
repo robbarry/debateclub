@@ -3,6 +3,7 @@ from typing import List, Optional
 from pydantic import ValidationError
 from debateclub.models import DebateTopic, Position, DebateArgument
 from debateclub.llms import load_all_models
+import re
 
 models = load_all_models()
 
@@ -76,6 +77,18 @@ def generate_argument(
                     f"Validation Error: {e}. Max retries exceeded. Failed to create argument."
                 )
                 raise  # re-raise the error for logging
+        except Exception as e:
+            if attempt < max_retries - 1:  # Don't wait on the last attempt
+                wait_time = 2**attempt
+                print(
+                    f"Error creating argument: {e}. Retrying in {wait_time} seconds..."
+                )
+                time.sleep(wait_time)
+            else:
+                print(
+                    f"Error creating argument: {e}. Max retries exceeded. Failed to create argument."
+                )
+                raise  # re-raise the error for logging
 
 
 def _create_completion(
@@ -101,7 +114,9 @@ def _create_completion(
 
     # Basic sanitization of the response
     if isinstance(response_text, str):
-        text = "".join(ch for ch in response_text if 0x20 <= ord(ch) < 0x10000)
+        # Remove code blocks
+        text = re.sub(r"```json\s*(.*?)\s*```", r"\1", response_text, flags=re.DOTALL)
+        text = "".join(ch for ch in text if 0x20 <= ord(ch) < 0x10000)
     elif hasattr(response_text, "model_dump_json"):  # Handle Pydantic models
         text = response_text.model_dump_json()
     else:
