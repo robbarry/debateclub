@@ -18,7 +18,7 @@ class GeminiProModel:
         # Create both an Instructor client for structured output and a raw client
         base_model = genai.GenerativeModel("gemini-2.0-flash-exp")
         self.structured_client = instructor.from_gemini(
-            client=base_model, mode=instructor.Mode.GEMINI_TOOLS
+            client=base_model, mode=instructor.Mode.GEMINI_JSON
         )
         self.raw_client = base_model
 

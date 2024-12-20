@@ -45,7 +45,7 @@ class ClaudeSonnetModel:
                 model=self.model_name(),
                 messages=anthropic_messages,
                 response_model=response_model,
-                max_tokens=1024,
+                max_tokens=2048,
                 **kwargs,
             )
             return response
@@ -54,7 +54,7 @@ class ClaudeSonnetModel:
             response = self.client.messages.create(
                 model=self.model_name(),
                 messages=anthropic_messages,
-                max_tokens=1024,
+                max_tokens=2048,
                 **kwargs,
             )
             return response.content[0].text

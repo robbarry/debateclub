@@ -4,14 +4,14 @@ from debateclub.models import (
     DebateArgument,
     JudgmentExtraction,
     JudgmentResult,
-    Position,
     TextResponse,
 )
-from debateclub.llms import load_all_models, LLMModel
+from debateclub.llms import LLMModel
+from debateclub.llms.models_manager import get_models
 from pydantic import ValidationError
 import re
 
-models = load_all_models()
+models = get_models()
 
 
 def judge_debate(

@@ -9,18 +9,18 @@ from debateclub.models import (
     DebateArgument,
     JudgmentResult,
 )
-from debateclub.llms import load_all_models, LLMModel
+from debateclub.llms import LLMModel
 from debateclub import db
 from debateclub import elo
 from debateclub import argumentation
 from debateclub import judging
-from debateclub import utils
+from debateclub.llms.models_manager import get_models
 
 
 class DebateArena:
     def __init__(self, db_path="debate_arena.db"):
-        self.models = load_all_models()
-        self.round_count = 3  # Standard number of debate rounds
+        self.models = get_models()
+        self.round_count = 3
         self.db_path = db_path
 
     def generate_topic(

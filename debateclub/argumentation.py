@@ -1,11 +1,13 @@
+import re
 import time
 from typing import List, Optional
 from pydantic import ValidationError
 from debateclub.models import DebateTopic, Position, DebateArgument
-from debateclub.llms import load_all_models, LLMModel
-import re
+from debateclub.llms import LLMModel
+from debateclub.llms.models_manager import get_models
 
-models = load_all_models()
+
+models = get_models()
 
 
 def generate_argument(
