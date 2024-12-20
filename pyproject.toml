@@ -9,4 +9,5 @@ dependencies = [
     "google-genai>=0.3.0",
     "google-generativeai>=0.8.3",
     "instructor>=1.7.0",
+    "prettytable>=3.12.0",
 ]

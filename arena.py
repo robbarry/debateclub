@@ -6,12 +6,15 @@ import instructor
 from openai import OpenAI
 from anthropic import Anthropic
 import google.generativeai as genai
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 import re
 import time
 import sqlite3
 import json
 from math import pow
+from prettytable import PrettyTable
+from pydantic import ValidationError
+
 
 # Initialize the clients with instructor
 openai_client = instructor.patch(OpenAI())
@@ -111,6 +114,19 @@ class DebateArena:
             CREATE TABLE IF NOT EXISTS elo_ratings (
                 model TEXT PRIMARY KEY,
                 rating INTEGER NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS wins_losses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                topic TEXT NOT NULL,
+                model1 TEXT NOT NULL,
+                model2 TEXT NOT NULL,
+                winner TEXT,
+                model1_elo INTEGER NOT NULL,
+                model2_elo INTEGER NOT NULL
             )
             """
         )
@@ -223,34 +239,34 @@ class DebateArena:
         last_argument = previous_arguments[0] if previous_arguments else None
 
         context = f"""Topic: {topic.topic}
-            Your position: {position.value}
-            Context: {topic.context}
-            {'Pro position: ' + topic.pro_position if position == Position.PRO else 'Con position: ' + topic.con_position}
-            
-            """
+        Your position: {position.value}
+        Context: {topic.context}
+        {'Pro position: ' + topic.pro_position if position == Position.PRO else 'Con position: ' + topic.con_position}
+        
+        """
         if last_argument:
             context += f"""
-            The opposing side's last argument was:
-            {last_argument.argument}
-            
-            Craft a detailed and comprehensive argument in support of your position that directly responds to the opposition’s last argument.
-            Your argument should be well-reasoned, and include supporting key points, and anticipated counter arguments to the last point made by your opponent.
-            """
+        The opposing side's last argument was:
+        {last_argument.argument}
+        
+        Craft a detailed and comprehensive argument in support of your position that directly responds to the opposition’s last argument.
+        Your argument should be well-reasoned, and include supporting key points, and anticipated counter arguments to the last point made by your opponent.
+        """
         else:
             context += """
-            Provide a detailed and comprehensive argument in support of your position.
-            Your argument should be well-reasoned, and include supporting key points, and anticipated counter arguments to your position.
-            """
+        Provide a detailed and comprehensive argument in support of your position.
+        Your argument should be well-reasoned, and include supporting key points, and anticipated counter arguments to your position.
+        """
 
         context += f"""
-            Provide your response in the following format:
-            {{
-                "position": "{position.value}",
-                "argument": "Your main argument. It should be very comprehensive",
-                "key_points": ["Point 1", "Point 2", "Point 3"],
-                "counter_arguments": ["Anticipated counter 1", "Anticipated counter 2"]
-            }}
-            """
+        Provide your response in the following format:
+        {{
+            "position": "{position.value}",
+            "argument": "Your main argument. It should be very comprehensive",
+            "key_points": ["Point 1", "Point 2", "Point 3"],
+            "counter_arguments": ["Anticipated counter 1", "Anticipated counter 2"]
+        }}
+        """
 
         for attempt in range(max_retries):
             try:
@@ -484,6 +500,7 @@ class DebateArena:
         con_arguments: List[DebateArgument],
         judgments: Tuple[JudgmentResult, JudgmentResult, JudgmentResult],
         winner: Optional[Position],
+        model_types: List[DebateModel],
     ):
         """Record the debate details in the database"""
         conn = sqlite3.connect(self.db_path)
@@ -509,6 +526,33 @@ class DebateArena:
                 con_scores_json,
                 winner.value if winner else None,
                 judge_scores_json,
+            ),
+        )
+
+        # get elos before calculation
+        cursor.execute(
+            "SELECT rating from elo_ratings WHERE model = ?", (model_types[0].value,)
+        )
+        model1_elo = cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT rating from elo_ratings WHERE model = ?", (model_types[1].value,)
+        )
+        model2_elo = cursor.fetchone()[0]
+
+        # Record to wins/losses table
+        cursor.execute(
+            """
+            INSERT INTO wins_losses (
+                topic, model1, model2, winner, model1_elo, model2_elo
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                topic.topic,
+                model_types[0].value,
+                model_types[1].value,
+                winner.value if winner else None,
+                model1_elo,
+                model2_elo,
             ),
         )
 
@@ -551,6 +595,31 @@ class DebateArena:
         conn.commit()
         conn.close()
 
+    def display_win_loss_table(self):
+        """Display win/loss table from database."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute(
+            "SELECT topic, model1, model2, winner, model1_elo, model2_elo FROM wins_losses"
+        )
+        rows = cursor.fetchall()
+
+        table = PrettyTable()
+        table.field_names = [
+            "Topic",
+            "Model 1",
+            "Model 2",
+            "Winner",
+            "Model 1 ELO",
+            "Model 2 ELO",
+        ]
+        for row in rows:
+            table.add_row(row)
+        print("\nWin/Loss Table:")
+        print(table)
+        conn.close()
+
 
 def run_debates(num_runs=1):
     """Run multiple debate simulations"""
@@ -567,6 +636,9 @@ def run_debates(num_runs=1):
             cursor.execute("SELECT summary FROM topics WHERE topic = ?", (topic.topic,))
             topic_summary = cursor.fetchone()[0]
 
+            # get models
+            model_types = random.sample(list(DebateModel), 2)
+
             arena.record_debate(
                 topic,
                 topic_summary,
@@ -582,10 +654,8 @@ def run_debates(num_runs=1):
                 ],
                 judgments,
                 winner,
+                model_types,
             )
-
-            # get models
-            model_types = random.sample(list(DebateModel), 2)
 
             if winner == Position.PRO:
                 arena.calculate_elo(model_types[0], model_types[1])
@@ -609,6 +679,10 @@ def run_debates(num_runs=1):
                 print(f"Overall: {judgment.con_score.overall_score}")
                 print(f"Reasoning: {judgment.con_score.reasoning}")
             time.sleep(0.1)  # small delay to allow the resources to clean up
+
+            # Display win/loss table
+            arena.display_win_loss_table()
+
     finally:
         del arena.gemini_client
 
