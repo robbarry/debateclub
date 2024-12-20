@@ -43,9 +43,9 @@ class DebateTopic(BaseModel):
 
 class DebateArgument(BaseModel):
     position: Position
-    argument: str
-    key_points: List[str]
-    counter_arguments: List[str]
+    introduction: str
+    premises: List[Tuple[str, str]]  # Premise and evidence
+    rebuttal: str
 
 
 class JudgmentScore(BaseModel):
@@ -247,24 +247,30 @@ class DebateArena:
         if last_argument:
             context += f"""
         The opposing side's last argument was:
-        {last_argument.argument}
+         Introduction: {last_argument.introduction}
+          Premises: {[premise for premise, _ in last_argument.premises]}
+          Rebuttal: {last_argument.rebuttal}
         
         Craft a detailed and comprehensive argument in support of your position that directly responds to the opposition’s last argument.
-        Your argument should be well-reasoned, and include supporting key points, and anticipated counter arguments to the last point made by your opponent.
+        Your argument should be well-reasoned, and follow the required structure, including supporting key points with evidence, and anticipating counter arguments to the last point made by your opponent.
         """
         else:
             context += """
-        Provide a detailed and comprehensive argument in support of your position.
-        Your argument should be well-reasoned, and include supporting key points, and anticipated counter arguments to your position.
+         Provide a detailed and comprehensive argument in support of your position.
+        Your argument should be well-reasoned and should follow the required structure, including supporting key points with evidence, and anticipating counter arguments to your position.
         """
 
         context += f"""
         Provide your response in the following format:
         {{
             "position": "{position.value}",
-            "argument": "Your main argument. It should be very comprehensive",
-            "key_points": ["Point 1", "Point 2", "Point 3"],
-            "counter_arguments": ["Anticipated counter 1", "Anticipated counter 2"]
+            "introduction": "A concise 1-2 sentence introduction to your argument",
+             "premises": [
+                ["Premise 1", "Evidence/Reference for Premise 1"],
+                ["Premise 2", "Evidence/Reference for Premise 2"],
+                ["Premise 3", "Evidence/Reference for Premise 3"]
+                ],
+            "rebuttal": "A direct rebuttal to the opponent's previous key points"
         }}
         """
 
@@ -369,9 +375,16 @@ class DebateArena:
         return response.text
 
     def _format_arguments(self, arguments: List[DebateArgument]) -> str:
-        return "\n".join(
-            f"Round {i+1}: {arg.argument}" for i, arg in enumerate(arguments)
-        )
+        formatted_args = []
+        for i, arg in enumerate(arguments):
+            formatted_arg = f"Round {i + 1}:\n"
+            formatted_arg += f"  Introduction: {arg.introduction}\n"
+            formatted_arg += "  Premises:\n"
+            for j, (premise, evidence) in enumerate(arg.premises):
+                formatted_arg += f"    {j+1}. {premise} (Evidence: {evidence})\n"
+            formatted_arg += f"  Rebuttal: {arg.rebuttal}\n"
+            formatted_args.append(formatted_arg)
+        return "\n".join(formatted_args)
 
     def run_debate(
         self,
@@ -452,9 +465,12 @@ class DebateArena:
                     )
                     last_con_argument = argument
                     con_arguments.append(argument)
-                print(f"Argument: {argument.argument}")
-                print("Key points:", ", ".join(argument.key_points))
 
+                print(f"Argument: \n{argument.introduction}")
+                print("Premises:")
+                for i, (premise, evidence) in enumerate(argument.premises):
+                    print(f"   {i+1}. {premise} (Evidence: {evidence})")
+                print(f"Rebuttal: {argument.rebuttal}\n")
         # Get judgments from all three models
         print("\nJudges are evaluating the debate...")
         judgments = []
