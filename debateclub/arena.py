@@ -28,8 +28,11 @@ class DebateArena:
         self, round_num: int, debater: str, position: Position, argument: DebateArgument
     ):
         """Display a single round's argument in tabulated format"""
+        # Get ELO rating for the debater
+        elo_rating = db.get_elo_rating(debater)
+
         # Create header for the round
-        print(f"\nRound {round_num} - {debater} ({position.value})")
+        print(f"\nRound {round_num} - {debater} (ELO: {elo_rating}) ({position.value})")
 
         # Format introduction
         intro_table = [[argument.introduction]]
@@ -177,10 +180,22 @@ class DebateArena:
 
         # Display debate setup
         setup_data = [
-            ["Role", "Model"],
-            ["Debater 1", selected_models[0].model_name()],
-            ["Debater 2", selected_models[1].model_name()],
-            ["Judge", judge_model.model_name()],
+            ["Role", "Model", "ELO"],
+            [
+                "Debater 1",
+                selected_models[0].model_name(),
+                db.get_elo_rating(selected_models[0].model_name()),
+            ],
+            [
+                "Debater 2",
+                selected_models[1].model_name(),
+                db.get_elo_rating(selected_models[1].model_name()),
+            ],
+            [
+                "Judge",
+                judge_model.model_name(),
+                db.get_elo_rating(judge_model.model_name()),
+            ],
         ]
         print(tabulate(setup_data, headers="firstrow", tablefmt="grid"))
 
