@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import List
 from debateclub.models import (
     DebateTopic,
     DebateArgument,
@@ -11,7 +11,6 @@ from debateclub.llms import load_all_models
 from pydantic import ValidationError
 import re
 
-
 models = load_all_models()
 
 
@@ -21,8 +20,6 @@ def judge_debate(
     pro_arguments: List[DebateArgument],
     con_arguments: List[DebateArgument],
 ) -> JudgmentResult:
-    """Judges the debate based on the provided arguments."""
-
     debate_summary = f"""Topic: {topic.topic}
     Context: {topic.context}
 
@@ -54,15 +51,9 @@ def judge_debate(
         [{"role": "user", "content": debate_summary}],
         JudgmentExtraction,
     )
-    # transform dict to tuple.
-    if extraction.pro_claims:
-        extraction.pro_claims = [
-            (item["claim"], item["reasoning"]) for item in extraction.pro_claims
-        ]
-    if extraction.con_claims:
-        extraction.con_claims = [
-            (item["claim"], item["reasoning"]) for item in extraction.con_claims
-        ]
+
+    # No need to transform to tuples anymore since we now have `Claim` objects
+    # extraction.pro_claims and extraction.con_claims are already lists of Claim models.
 
     scoring_prompt = f"""
     Based on the extracted information:
@@ -70,8 +61,8 @@ def judge_debate(
     Topic: {topic.topic}
     Context: {topic.context}
 
-    Pro Claims: {extraction.pro_claims}
-    Con Claims: {extraction.con_claims}
+    Pro Claims: {[ (c.claim, c.reasoning) for c in extraction.pro_claims ]}
+    Con Claims: {[ (c.claim, c.reasoning) for c in extraction.con_claims ]}
     Pro Rebuttals: {extraction.pro_rebuttals}
     Con Rebuttals: {extraction.con_rebuttals}
     Logical Fallacies: {extraction.logical_fallacies}
@@ -108,7 +99,7 @@ def judge_debate(
         JudgmentResult,
     )
 
-    # convert to ints incase LLM failed to follow instructions
+    # Convert scores to int in case the model fails to comply
     response.pro_score.logic_score = int(response.pro_score.logic_score)
     response.pro_score.evidence_score = int(response.pro_score.evidence_score)
     response.pro_score.rebuttal_score = int(response.pro_score.rebuttal_score)
@@ -123,7 +114,6 @@ def judge_debate(
 
 
 def summarize_topic(judge_model_name: str, topic: DebateTopic) -> str:
-    """Summarizes the topic using the specified LLM."""
     prompt = f"""Please provide a short, high-level summary of the following debate topic.
 
       Topic: {topic.topic}
@@ -141,7 +131,6 @@ def summarize_topic(judge_model_name: str, topic: DebateTopic) -> str:
 
 
 def _format_arguments(arguments: List[DebateArgument]) -> str:
-    """Formats a list of debate arguments into a readable string."""
     formatted_args = []
     for i, arg in enumerate(arguments):
         formatted_arg = f"Round {i + 1}:\n"
@@ -168,24 +157,11 @@ def _create_completion(
         )
 
     model = models[model_name]
-    if model_name == "claude-3-5-sonnet-20241022":
-        response_text = model().generate_response(messages)
-    elif model_name == "gemini-exp-1206":
-        response_text = model().generate_response(messages)
-    else:
-        response_text = model().generate_response(
-            messages, response_model=response_model
-        )
+    response_text = model().generate_response(messages)
 
-    # Basic sanitization of the response
-    if isinstance(response_text, str):
-        # Remove code blocks
-        text = re.sub(r"```json\s*(.*?)\s*```", r"\1", response_text, flags=re.DOTALL)
-        text = "".join(ch for ch in text if 0x20 <= ord(ch) < 0x10000)
-    elif hasattr(response_text, "model_dump_json"):  # Handle Pydantic models
-        text = response_text.model_dump_json()
-    else:
-        text = str(response_text)
+    # Basic sanitization
+    text = re.sub(r"```json\s*(.*?)\s*```", r"\1", response_text, flags=re.DOTALL)
+    text = "".join(ch for ch in text if 0x20 <= ord(ch) < 0x10000)
 
     if is_json:
         try:

@@ -1,4 +1,4 @@
-from typing import List, Tuple, Optional
+from typing import List, Optional
 from enum import Enum
 from pydantic import BaseModel, Field
 
@@ -11,7 +11,7 @@ class Position(str, Enum):
 class DebateModel(str, Enum):
     ANTHROPIC = "claude-3-5-sonnet-20241022"
     OPENAI = "gpt-4o"
-    GEMINI = "gemini-exp-1206"
+    GEMINI = "gemini-2.0-flash-exp"
 
 
 class DebateTopic(BaseModel):
@@ -33,33 +33,15 @@ class DebateArgument(BaseModel):
     rebuttal: str
 
 
+# Define a Claim model matching the JSON structure
+class Claim(BaseModel):
+    claim: str
+    reasoning: str
+
+
 class JudgmentExtraction(BaseModel):
-    pro_claims: List[Tuple[str, str]] = Field(
-        ...,
-        json_schema_extra={
-            "items": {
-                "type": "object",
-                "properties": {
-                    "claim": {"type": "string"},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["claim", "reasoning"],
-            }
-        },
-    )
-    con_claims: List[Tuple[str, str]] = Field(
-        ...,
-        json_schema_extra={
-            "items": {
-                "type": "object",
-                "properties": {
-                    "claim": {"type": "string"},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["claim", "reasoning"],
-            }
-        },
-    )
+    pro_claims: List[Claim]
+    con_claims: List[Claim]
     pro_rebuttals: List[str]
     con_rebuttals: List[str]
     logical_fallacies: List[str]

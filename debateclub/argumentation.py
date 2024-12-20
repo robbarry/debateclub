@@ -105,7 +105,7 @@ def _create_completion(
     model = models[model_name]
     if model_name == "claude-3-5-sonnet-20241022":
         response_text = model().generate_response(messages)
-    elif model_name == "gemini-exp-1206":
+    elif model_name == "gemini-2.0-flash-exp":
         response_text = model().generate_response(messages)
     else:
         response_text = model().generate_response(
