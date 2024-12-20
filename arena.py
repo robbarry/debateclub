@@ -8,7 +8,7 @@ from anthropic import Anthropic
 import google.generativeai as genai
 from pydantic import BaseModel
 import re
-import json
+import time
 
 # Initialize the clients with instructor
 openai_client = instructor.patch(OpenAI())
@@ -317,6 +317,8 @@ if __name__ == "__main__":
     arena = DebateArena()
     judgments = arena.run_debate()
     winner = arena.determine_winner(judgments)
+    # Explicitly delete the Gemini client to encourage faster shutdown
+    del gemini_client
 
     print(f"\nDebate Winner: {winner.value if winner else 'Tie'}")
     for i, judgment in enumerate(judgments):
@@ -335,3 +337,4 @@ if __name__ == "__main__":
         print(f"Rebuttal: {judgment.con_score.rebuttal_score}")
         print(f"Overall: {judgment.con_score.overall_score}")
         print(f"Reasoning: {judgment.con_score.reasoning}")
+    time.sleep(0.1)  # small delay to allow the resources to clean up
