@@ -9,6 +9,9 @@ import google.generativeai as genai
 from pydantic import BaseModel
 import re
 import time
+import sqlite3
+import json
+from math import pow
 
 # Initialize the clients with instructor
 openai_client = instructor.patch(OpenAI())
@@ -57,14 +60,68 @@ class JudgmentResult(BaseModel):
     explanation: str
 
 
+class TextResponse(BaseModel):
+    text: str
+
+
 class DebateArena:
-    def __init__(self):
+    def __init__(self, db_path="debate_arena.db"):
         self.models = {
             DebateModel.ANTHROPIC: (anthropic_client, "claude-3-5-sonnet-20241022"),
             DebateModel.OPENAI: (openai_client, "gpt-4o"),
             DebateModel.GEMINI: (gemini_client, "gemini-exp-1206"),
         }
         self.round_count = 3  # Standard number of debate rounds
+        self.db_path = db_path
+        self._init_db()
+
+    def _init_db(self):
+        """Initialize the SQLite database and tables if they don't exist."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS debates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                topic TEXT NOT NULL,
+                topic_summary TEXT NOT NULL,
+                context TEXT NOT NULL,
+                pro_arguments TEXT NOT NULL,
+                con_arguments TEXT NOT NULL,
+                pro_scores TEXT NOT NULL,
+                con_scores TEXT NOT NULL,
+                winner TEXT,
+                judge_scores TEXT
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS topics (
+                topic TEXT PRIMARY KEY,
+                summary TEXT NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS elo_ratings (
+                model TEXT PRIMARY KEY,
+                rating INTEGER NOT NULL
+            )
+            """
+        )
+        # Initialize elo ratings if not in DB
+        for model in DebateModel:
+            cursor.execute(
+                "INSERT OR IGNORE INTO elo_ratings (model, rating) VALUES (?, ?)",
+                (model.value, 1000),
+            )
+
+        conn.commit()
+        conn.close()
 
     def _create_completion(
         self,
@@ -120,19 +177,24 @@ class DebateArena:
             return response_model.model_validate_json(text)
 
     def generate_topic(
-        self, judge_model: Tuple[Union[OpenAI, Anthropic, Any], str]
+        self,
+        judge_model: Tuple[Union[OpenAI, Anthropic, Any], str],
+        previous_topics: List[str] = [],
     ) -> DebateTopic:
         client, model = judge_model
-        prompt = """Generate a balanced, thoughtful debate topic that has clear pro and con positions.
+        prompt = f"""Generate a balanced, thoughtful debate topic that has clear pro and con positions.
         The topic should be nuanced enough for meaningful discussion but not overly controversial.
         
+        Ensure that the debate topic is different from the following previous topics:
+         {', '.join(previous_topics)}
+
         Provide output in the following format:
-        {
+        {{
             "topic": "The debate topic as a question",
             "context": "Brief background context for the debate",
             "pro_position": "Clear statement of the pro position",
             "con_position": "Clear statement of the con position"
-        }
+        }}
         """
 
         return self._create_completion(
@@ -217,12 +279,30 @@ class DebateArena:
             client, model, [{"role": "user", "content": debate_summary}], JudgmentResult
         )
 
+    def summarize_topic(
+        self, judge_model: Tuple[Union[OpenAI, Anthropic, Any], str], topic: DebateTopic
+    ) -> str:
+        client, model = judge_model
+        prompt = f"""Please provide a short, high-level summary of the following debate topic.
+
+          Topic: {topic.topic}
+          Context: {topic.context}
+          Pro Position: {topic.pro_position}
+          Con Position: {topic.con_position}
+          """
+        response = self._create_completion(
+            client, model, [{"role": "user", "content": prompt}], TextResponse
+        )
+        return response.text
+
     def _format_arguments(self, arguments: List[DebateArgument]) -> str:
         return "\n".join(
             f"Round {i+1}: {arg.argument}" for i, arg in enumerate(arguments)
         )
 
-    def run_debate(self) -> Tuple[JudgmentResult, JudgmentResult, JudgmentResult]:
+    def run_debate(
+        self,
+    ) -> Tuple[JudgmentResult, JudgmentResult, JudgmentResult, DebateTopic]:
         # Select model types first
         model_types = random.sample(list(DebateModel), 2)
         judge_type = next(m for m in DebateModel if m not in model_types)
@@ -231,15 +311,32 @@ class DebateArena:
         debater_models = [(self.models[model_type]) for model_type in model_types]
         judge_model = self.models[judge_type]
 
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # Retrieve previous topics from the database
+        cursor.execute("SELECT topic FROM topics")
+        previous_topics = [row[0] for row in cursor.fetchall()]
+
         print("Starting debate...")
         print(f"Debater 1: {model_types[0]}")
         print(f"Debater 2: {model_types[1]}")
         print(f"Judge: {judge_type}")
 
         # Generate topic using the judge model
-        topic = self.generate_topic(judge_model)
+        topic = self.generate_topic(judge_model, previous_topics)
         print(f"\nDebate Topic: {topic.topic}")
         print(f"Context: {topic.context}")
+
+        # Generate topic summary for DB storage
+        topic_summary = self.summarize_topic(judge_model, topic)
+
+        # Store the topic and summary
+        cursor.execute(
+            "INSERT OR IGNORE INTO topics (topic, summary) VALUES (?,?)",
+            (topic.topic, topic_summary),
+        )
+        conn.commit()
 
         # Randomly assign positions
         positions = random.sample([Position.PRO, Position.CON], 2)
@@ -287,7 +384,9 @@ class DebateArena:
             )
             judgments.append(judgment)
 
-        return tuple(judgments)
+        conn.close()
+
+        return tuple(judgments), topic
 
     def determine_winner(
         self, judgments: Tuple[JudgmentResult, JudgmentResult, JudgmentResult]
@@ -312,29 +411,151 @@ class DebateArena:
             else:
                 return None  # True tie
 
+    def record_debate(
+        self,
+        topic: DebateTopic,
+        topic_summary: str,
+        pro_arguments: List[DebateArgument],
+        con_arguments: List[DebateArgument],
+        judgments: Tuple[JudgmentResult, JudgmentResult, JudgmentResult],
+        winner: Optional[Position],
+    ):
+        """Record the debate details in the database"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        pro_scores_json = json.dumps([j.pro_score.model_dump() for j in judgments])
+        con_scores_json = json.dumps([j.con_score.model_dump() for j in judgments])
+        judge_scores_json = json.dumps([j.model_dump() for j in judgments])
+
+        cursor.execute(
+            """
+            INSERT INTO debates (
+                topic, topic_summary, context, pro_arguments, con_arguments, pro_scores, con_scores, winner, judge_scores
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                topic.topic,
+                topic_summary,
+                topic.context,
+                json.dumps([arg.model_dump() for arg in pro_arguments]),
+                json.dumps([arg.model_dump() for arg in con_arguments]),
+                pro_scores_json,
+                con_scores_json,
+                winner.value if winner else None,
+                judge_scores_json,
+            ),
+        )
+
+        conn.commit()
+        conn.close()
+
+    def calculate_elo(
+        self, winner: Optional[DebateModel], loser: Optional[DebateModel]
+    ) -> None:
+        """Calculates and updates ELO rating"""
+        if not winner or not loser:
+            return  # do not update elo on a tie
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute(
+            "SELECT rating from elo_ratings WHERE model = ?", (winner.value,)
+        )
+        winner_elo = cursor.fetchone()[0]
+        cursor.execute("SELECT rating from elo_ratings WHERE model = ?", (loser.value,))
+        loser_elo = cursor.fetchone()[0]
+
+        k = 32
+        expected_winner = 1 / (1 + pow(10, (loser_elo - winner_elo) / 400))
+        expected_loser = 1 / (1 + pow(10, (winner_elo - loser_elo) / 400))
+
+        new_winner_elo = int(winner_elo + k * (1 - expected_winner))
+        new_loser_elo = int(loser_elo + k * (0 - expected_loser))
+
+        cursor.execute(
+            "UPDATE elo_ratings SET rating = ? WHERE model = ?",
+            (new_winner_elo, winner.value),
+        )
+        cursor.execute(
+            "UPDATE elo_ratings SET rating = ? WHERE model = ?",
+            (new_loser_elo, loser.value),
+        )
+
+        conn.commit()
+        conn.close()
+
+
+def run_debates(num_runs=1):
+    """Run multiple debate simulations"""
+    arena = DebateArena()
+    for i in range(num_runs):
+        print(f"\n----- Debate Run {i+1} -----")
+        judgments, topic = arena.run_debate()
+        winner = arena.determine_winner(judgments)
+
+        # Get a summary from the LLM and save it to the DB
+        conn = sqlite3.connect(arena.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT summary FROM topics WHERE topic = ?", (topic.topic,))
+        topic_summary = cursor.fetchone()[0]
+
+        arena.record_debate(
+            topic,
+            topic_summary,
+            [
+                a
+                for a in judgments[0].model_dump()["pro_score"].values()
+                if type(a) is list
+            ],
+            [
+                a
+                for a in judgments[0].model_dump()["con_score"].values()
+                if type(a) is list
+            ],
+            judgments,
+            winner,
+        )
+
+        # get models
+        model_types = random.sample(list(DebateModel), 2)
+
+        if winner == Position.PRO:
+            arena.calculate_elo(model_types[0], model_types[1])
+        elif winner == Position.CON:
+            arena.calculate_elo(model_types[1], model_types[0])
+
+        del gemini_client
+        print(f"\nDebate Winner: {winner.value if winner else 'Tie'}")
+        for i, judgment in enumerate(judgments):
+            print(f"\nJudge {i+1} Decision:")
+            print(f"Winner: {judgment.winner.value if judgment.winner else 'Tie'}")
+            print(f"Explanation: {judgment.explanation}")
+            print("\nPro Scores:")
+            print(f"Logic: {judgment.pro_score.logic_score}")
+            print(f"Evidence: {judgment.pro_score.evidence_score}")
+            print(f"Rebuttal: {judgment.pro_score.rebuttal_score}")
+            print(f"Overall: {judgment.pro_score.overall_score}")
+            print(f"Reasoning: {judgment.pro_score.reasoning}")
+            print("\nCon Scores:")
+            print(f"Logic: {judgment.con_score.logic_score}")
+            print(f"Evidence: {judgment.con_score.evidence_score}")
+            print(f"Rebuttal: {judgment.con_score.rebuttal_score}")
+            print(f"Overall: {judgment.con_score.overall_score}")
+            print(f"Reasoning: {judgment.con_score.reasoning}")
+        time.sleep(0.1)  # small delay to allow the resources to clean up
+
+    # Show the ELO rating table after the simulation is complete
+    conn = sqlite3.connect(arena.db_path)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT * FROM elo_ratings")
+    print("\nELO Ratings:")
+    for row in cursor.fetchall():
+        print(f"Model: {row[0]}, Rating: {row[1]}")
+    conn.close()
+
 
 if __name__ == "__main__":
-    arena = DebateArena()
-    judgments = arena.run_debate()
-    winner = arena.determine_winner(judgments)
-    # Explicitly delete the Gemini client to encourage faster shutdown
-    del gemini_client
-
-    print(f"\nDebate Winner: {winner.value if winner else 'Tie'}")
-    for i, judgment in enumerate(judgments):
-        print(f"\nJudge {i+1} Decision:")
-        print(f"Winner: {judgment.winner.value if judgment.winner else 'Tie'}")
-        print(f"Explanation: {judgment.explanation}")
-        print("\nPro Scores:")
-        print(f"Logic: {judgment.pro_score.logic_score}")
-        print(f"Evidence: {judgment.pro_score.evidence_score}")
-        print(f"Rebuttal: {judgment.pro_score.rebuttal_score}")
-        print(f"Overall: {judgment.pro_score.overall_score}")
-        print(f"Reasoning: {judgment.pro_score.reasoning}")
-        print("\nCon Scores:")
-        print(f"Logic: {judgment.con_score.logic_score}")
-        print(f"Evidence: {judgment.con_score.evidence_score}")
-        print(f"Rebuttal: {judgment.con_score.rebuttal_score}")
-        print(f"Overall: {judgment.con_score.overall_score}")
-        print(f"Reasoning: {judgment.con_score.reasoning}")
-    time.sleep(0.1)  # small delay to allow the resources to clean up
+    run_debates(num_runs=2)  # Run 2 debates for now
