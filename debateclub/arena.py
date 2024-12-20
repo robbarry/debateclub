@@ -5,12 +5,11 @@ import time
 
 from debateclub.models import (
     Position,
-    DebateModel,
     DebateTopic,
     DebateArgument,
     JudgmentResult,
 )
-from debateclub.llms import load_all_models
+from debateclub.llms import load_all_models, LLMModel
 from debateclub import db
 from debateclub import elo
 from debateclub import argumentation
@@ -46,7 +45,9 @@ class DebateArena:
         """
 
         return judging._create_completion(
-            judge_model_name, [{"role": "user", "content": prompt}], DebateTopic
+            self.models[judge_model_name],
+            [{"role": "user", "content": prompt}],
+            DebateTopic,
         )
 
     def run_debate(
@@ -54,38 +55,37 @@ class DebateArena:
     ) -> Tuple[Tuple[JudgmentResult, JudgmentResult, JudgmentResult], DebateTopic]:
         """Runs a single debate."""
         # Select model types first
-        model_types = random.sample(list(DebateModel), 2)
-        judge_type = next(m for m in DebateModel if m not in model_types)
+        selected_models = random.sample(list(self.models.values()), 2)
+        judge_model = next(m for m in self.models.values() if m not in selected_models)
 
         # Get the actual client-model tuples
-        debater_model_names = [model_type.value for model_type in model_types]
-        judge_model_name = judge_type.value
+        debater_models = [model for model in selected_models]
 
         # Retrieve previous topics from the database
         previous_topics = db.get_previous_topics()
 
         print("Starting debate...")
-        print(f"Debater 1: {model_types[0]}")
-        print(f"Debater 2: {model_types[1]}")
-        print(f"Judge: {judge_type}")
+        print(f"Debater 1: {selected_models[0].model_name()}")
+        print(f"Debater 2: {selected_models[1].model_name()}")
+        print(f"Judge: {judge_model.model_name()}")
 
         # Generate topic using the judge model
-        topic = self.generate_topic(judge_model_name, previous_topics)
+        topic = self.generate_topic(judge_model.model_name(), previous_topics)
         print(f"\nDebate Topic: {topic.topic}")
         print(f"Context: {topic.context}")
 
         # Generate topic summary for DB storage
-        topic_summary = judging.summarize_topic(judge_model_name, topic)
+        topic_summary = judging.summarize_topic(judge_model.model_name(), topic)
 
         # Store the topic and summary
         db.insert_topic_data(topic.topic, topic_summary)
 
         # Randomly assign positions
         positions = random.sample([Position.PRO, Position.CON], 2)
-        debaters = list(zip(debater_model_names, positions))
+        debaters = list(zip(debater_models, positions))
 
-        print(f"\n{debaters[0][0]}: {debaters[0][1].value}")
-        print(f"{debaters[1][0]}: {debaters[1][1].value}\n")
+        print(f"\n{debaters[0][0].model_name()}: {debaters[0][1].value}")
+        print(f"{debaters[1][0].model_name()}: {debaters[1][1].value}\n")
 
         # Run debate rounds
         pro_arguments = []
@@ -97,15 +97,15 @@ class DebateArena:
             print(f"\nRound {round_num + 1}:")
             # Alternate who goes first each round
             if round_num % 2 == 0:
-                order = debaters
+                debater_order = debaters
             else:
-                order = debaters[::-1]
+                debater_order = debaters[::-1]
 
-            for model_name, position in order:
-                print(f"\n{model_name} ({position.value}) is presenting...")
+            for model, position in debater_order:
+                print(f"\n{model.model_name()} ({position.value}) is presenting...")
                 if position == Position.PRO:
                     argument = argumentation.generate_argument(
-                        model_name,
+                        model.model_name(),
                         topic,
                         position,
                         [last_con_argument] if last_con_argument else None,
@@ -114,7 +114,7 @@ class DebateArena:
                     pro_arguments.append(argument)
                 else:
                     argument = argumentation.generate_argument(
-                        model_name,
+                        model.model_name(),
                         topic,
                         position,
                         [last_pro_argument] if last_pro_argument else None,
@@ -132,10 +132,10 @@ class DebateArena:
         # Get judgments from all three models
         print("\nJudges are evaluating the debate...")
         judgments = []
-        for model_type in DebateModel:
-            print(f"\n{model_type} is judging...")
+        for model in self.models.values():
+            print(f"\n{model.model_name()} is judging...")
             judgment = judging.judge_debate(
-                model_type.value, topic, pro_arguments, con_arguments
+                model.model_name(), topic, pro_arguments, con_arguments
             )
             judgments.append(judgment)
 
@@ -173,7 +173,7 @@ class DebateArena:
         con_arguments: List[DebateArgument],
         judgments: Tuple[JudgmentResult, JudgmentResult, JudgmentResult],
         winner: Optional[Position],
-        model_types: List[DebateModel],
+        model_types: List[LLMModel],
     ):
         """Record the debate details in the database"""
 
@@ -194,14 +194,14 @@ class DebateArena:
         )
 
         # get elos before calculation
-        model1_elo = db.get_elo_rating(model_types[0].value)
-        model2_elo = db.get_elo_rating(model_types[1].value)
+        model1_elo = db.get_elo_rating(model_types[0].model_name())
+        model2_elo = db.get_elo_rating(model_types[1].model_name())
 
         # Record to wins/losses table
         db.insert_wins_losses(
             topic.topic,
-            model_types[0].value,
-            model_types[1].value,
+            model_types[0].model_name(),
+            model_types[1].model_name(),
             winner.value if winner else None,
             model1_elo,
             model2_elo,
@@ -238,7 +238,7 @@ def run_debates(num_runs=1):
             topic_summary = db.get_topic_summary(topic.topic)
 
             # get models
-            model_types = random.sample(list(DebateModel), 2)
+            selected_models = random.sample(list(arena.models.values()), 2)
 
             arena.record_debate(
                 topic,
@@ -255,13 +255,17 @@ def run_debates(num_runs=1):
                 ],
                 judgments,
                 winner,
-                model_types,
+                selected_models,
             )
 
             if winner == Position.PRO:
-                elo.update_elo_ratings(model_types[0], model_types[1])
+                elo.update_elo_ratings(
+                    selected_models[0].model_name(), selected_models[1].model_name()
+                )
             elif winner == Position.CON:
-                elo.update_elo_ratings(model_types[1], model_types[0])
+                elo.update_elo_ratings(
+                    selected_models[1].model_name(), selected_models[0].model_name()
+                )
             print(f"\nDebate Winner: {winner.value if winner else 'Tie'}")
             for i, judgment in enumerate(judgments):
                 print(f"\nJudge {i+1} Decision:")

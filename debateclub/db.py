@@ -1,9 +1,11 @@
 import sqlite3
 from typing import List, Tuple, Optional, Dict, Any
-from debateclub.models import DebateModel
 import json
+from debateclub.llms import load_all_models
+
 
 DB_PATH = "debate_arena.db"
+models = load_all_models()
 
 
 def _init_db():
@@ -58,10 +60,10 @@ def _init_db():
         """
     )
     # Initialize elo ratings if not in DB
-    for model in DebateModel:
+    for model in models.values():
         cursor.execute(
             "INSERT OR IGNORE INTO elo_ratings (model, rating) VALUES (?, ?)",
-            (model.value, 1000),
+            (model.model_name(), 1000),
         )
 
     conn.commit()

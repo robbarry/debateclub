@@ -7,7 +7,7 @@ from debateclub.models import (
     Position,
     TextResponse,
 )
-from debateclub.llms import load_all_models
+from debateclub.llms import load_all_models, LLMModel
 from pydantic import ValidationError
 import re
 
@@ -47,7 +47,7 @@ def judge_debate(
     """
 
     extraction = _create_completion(
-        judge_model_name,
+        models[judge_model_name],
         [{"role": "user", "content": debate_summary}],
         JudgmentExtraction,
     )
@@ -94,7 +94,7 @@ def judge_debate(
     """
 
     response = _create_completion(
-        judge_model_name,
+        models[judge_model_name],
         [{"role": "user", "content": scoring_prompt}],
         JudgmentResult,
     )
@@ -122,7 +122,7 @@ def summarize_topic(judge_model_name: str, topic: DebateTopic) -> str:
       Con Position: {topic.con_position}
       """
     response = _create_completion(
-        judge_model_name,
+        models[judge_model_name],
         [{"role": "user", "content": prompt}],
         TextResponse,
         is_json=False,
@@ -146,22 +146,31 @@ def _format_arguments(arguments: List[DebateArgument]) -> str:
 
 
 def _create_completion(
-    model_name: str,
+    model: LLMModel,
     messages: List[dict],
     response_model: type = None,
     is_json=True,
 ) -> any:
-    if model_name not in models:
-        raise ValueError(
-            f"Model '{model_name}' not found: Available models are {list(models.keys())}"
-        )
-
-    model = models[model_name]
-    response_text = model().generate_response(messages)
+    try:
+        if response_model:
+            response_text = model.generate_response(
+                messages, response_model=response_model
+            )
+        else:
+            response_text = model.generate_response(messages)
+    except Exception as e:
+        print(f"Error from LLM call: {e}")
+        raise
 
     # Basic sanitization
-    text = re.sub(r"```json\s*(.*?)\s*```", r"\1", response_text, flags=re.DOTALL)
-    text = "".join(ch for ch in text if 0x20 <= ord(ch) < 0x10000)
+    if isinstance(response_text, str):
+        # Remove code blocks
+        text = re.sub(r"json\s*(.*?)\s*", r"\1", response_text, flags=re.DOTALL)
+        text = "".join(ch for ch in text if 0x20 <= ord(ch) < 0x10000)
+    elif hasattr(response_text, "model_dump_json"):  # Handle Pydantic models
+        text = response_text.model_dump_json()
+    else:
+        text = str(response_text)
 
     if is_json:
         try:

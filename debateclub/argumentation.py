@@ -2,7 +2,7 @@ import time
 from typing import List, Optional
 from pydantic import ValidationError
 from debateclub.models import DebateTopic, Position, DebateArgument
-from debateclub.llms import load_all_models
+from debateclub.llms import load_all_models, LLMModel
 import re
 
 models = load_all_models()
@@ -57,7 +57,7 @@ def generate_argument(
     for attempt in range(max_retries):
         try:
             response = _create_completion(
-                model_name,
+                models[model_name],
                 [{"role": "user", "content": context}],
                 DebateArgument,
                 is_json=True,
@@ -92,27 +92,22 @@ def generate_argument(
 
 
 def _create_completion(
-    model_name: str,
+    model: LLMModel,
     messages: List[dict],
     response_model: type = None,
     is_json=True,
 ) -> any:
-    if model_name not in models:
-        raise ValueError(
-            f"Model '{model_name}' not found: Available models are {list(models.keys())}"
-        )
-
-    model = models[model_name]
-    if model_name == "claude-3-5-sonnet-20241022":
-        response_text = model().generate_response(messages)
-    elif model_name == "gemini-2.0-flash-exp":
-        response_text = model().generate_response(messages)
-    else:
-        response_text = model().generate_response(
-            messages, response_model=response_model
-        )
-
-    # Basic sanitization of the response
+    try:
+        if response_model:
+            response_text = model.generate_response(
+                messages, response_model=response_model
+            )
+        else:
+            response_text = model.generate_response(messages)
+    except Exception as e:
+        print(f"Error from LLM call: {e}")
+        raise
+    # Basic sanitization
     if isinstance(response_text, str):
         # Remove code blocks
         text = re.sub(r"```json\s*(.*?)\s*```", r"\1", response_text, flags=re.DOTALL)

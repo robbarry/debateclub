@@ -1,6 +1,6 @@
 from math import pow
 from typing import Optional
-from debateclub.models import DebateModel
+from debateclub.llms import load_all_models
 from debateclub import db
 
 
@@ -17,17 +17,15 @@ def calculate_elo_change(
     return new_winner_elo, new_loser_elo
 
 
-def update_elo_ratings(
-    winner: Optional[DebateModel], loser: Optional[DebateModel]
-) -> None:
+def update_elo_ratings(winner: Optional[str], loser: Optional[str]) -> None:
     """Updates ELO ratings in the database."""
     if not winner or not loser:
         return  # do not update elo on a tie
 
-    winner_elo = db.get_elo_rating(winner.value)
-    loser_elo = db.get_elo_rating(loser.value)
+    winner_elo = db.get_elo_rating(winner)
+    loser_elo = db.get_elo_rating(loser)
 
     new_winner_elo, new_loser_elo = calculate_elo_change(winner_elo, loser_elo)
 
-    db.update_elo_rating(winner.value, new_winner_elo)
-    db.update_elo_rating(loser.value, new_loser_elo)
+    db.update_elo_rating(winner, new_winner_elo)
+    db.update_elo_rating(loser, new_loser_elo)

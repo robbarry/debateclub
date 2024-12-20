@@ -8,12 +8,6 @@ class Position(str, Enum):
     CON = "con"
 
 
-class DebateModel(str, Enum):
-    ANTHROPIC = "claude-3-5-sonnet-20241022"
-    OPENAI = "gpt-4o"
-    GEMINI = "gemini-2.0-flash-exp"
-
-
 class DebateTopic(BaseModel):
     topic: str
     context: str
