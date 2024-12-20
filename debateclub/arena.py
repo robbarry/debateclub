@@ -14,14 +14,11 @@ from math import pow
 from prettytable import PrettyTable
 from pydantic import ValidationError
 import random
-
-# Initialize the clients with instructor
-openai_client = instructor.patch(OpenAI())
-anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-gemini_client = genai.GenerativeModel("gemini-exp-1206")  # Handle Gemini directly
+import importlib.util
+import inspect
 
 
+# Define your existing Enums and Pydantic models (Position, DebateModel, DebateTopic, etc.) here
 class Position(str, Enum):
     PRO = "pro"
     CON = "con"
@@ -111,16 +108,31 @@ class TextResponse(BaseModel):
 
 
 class DebateArena:
-    def __init__(self, db_path="debate_arena.db", gemini_client=None):
-        self.models = {
-            DebateModel.ANTHROPIC: (anthropic_client, "claude-3-5-sonnet-20241022"),
-            DebateModel.OPENAI: (openai_client, "gpt-4o"),
-            DebateModel.GEMINI: (gemini_client, "gemini-exp-1206"),
-        }
+    def __init__(self, db_path="debate_arena.db"):
+        self.models = self._load_models()
         self.round_count = 3  # Standard number of debate rounds
         self.db_path = db_path
-        self.gemini_client = gemini_client
         self._init_db()
+
+    def _load_models(self):
+        models = {}
+        llms_dir = os.path.join(os.path.dirname(__file__), "llms")
+        for filename in os.listdir(llms_dir):
+            if filename.endswith(".py") and filename != "__init__.py":
+                module_name = f"debateclub.llms.{filename[:-3]}"
+                spec = importlib.util.spec_from_file_location(
+                    module_name, os.path.join(llms_dir, filename)
+                )
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                for name, obj in inspect.getmembers(module):
+                    if inspect.isclass(obj) and hasattr(obj, "model_name"):
+                        try:
+                            model_instance = obj()
+                            models[obj.model_name()] = model_instance
+                        except Exception as e:
+                            print(f"Error loading model {name} from {filename}: {e}")
+        return models
 
     def _init_db(self):
         """Initialize the SQLite database and tables if they don't exist."""
@@ -185,75 +197,52 @@ class DebateArena:
 
     def _create_completion(
         self,
-        client: Union[OpenAI, Anthropic, Any],
-        model: str,
+        model_name: str,
         messages: List[dict],
-        response_model: type,
+        response_model: type = None,
         is_json=True,
     ) -> Any:
-        """Handle different client interfaces for completion creation"""
-        if isinstance(client, Anthropic):
-            # Convert messages to Anthropic format and use messages.create
-            content = "\n\n".join(msg["content"] for msg in messages)
-            response = client.messages.create(
-                model=model,
-                max_tokens=1024,
-                messages=[{"role": "user", "content": content}],
+        if model_name not in self.models:
+            raise ValueError(
+                f"Model '{model_name}' not found: Available models are {list(self.models.keys())}"
             )
-            # Parse the response to match the response_model
-            text = response.content[0].text
 
-            # Remove invalid control characters (e.g., null bytes)
-            text = "".join(ch for ch in text if 0x20 <= ord(ch) < 0x10000)
-            if is_json:
-                return response_model.model_validate_json(text)
-            else:
-                return response_model(text=text)
-        elif isinstance(client, genai.GenerativeModel):
-            # Handle Gemini's interface
-            content = "\n\n".join(msg["content"] for msg in messages)
-            response = client.generate_content(content)
-            # Parse the response to match the response_model
-            if hasattr(response, "text") and response.text:
-                text = response.text
-                # Remove markdown code blocks if present
-                text = re.sub(
-                    r"```(?:json)?\s*(.*)\s*```", r"\1", text, flags=re.DOTALL
-                )
-                # Remove invalid control characters (e.g., null bytes)
-                text = "".join(ch for ch in text if 0x20 <= ord(ch) < 0x10000)
-                if is_json:
-                    return response_model.model_validate_json(text)
-                else:
-                    return response_model(text=text)
-            else:
-                raise ValueError(
-                    f"Gemini Response did not include a response text: {response}"
-                )
+        model = self.models[model_name]
+        if model_name == DebateModel.ANTHROPIC.value:
+            response_text = model.generate_response(messages)
+        elif model_name == DebateModel.GEMINI.value:
+            response_text = model.generate_response(messages)
         else:
-            # Use instructor's patched interface for OpenAI
-            response = client.chat.completions.create(
-                model=model, response_model=response_model, messages=messages
+            response_text = model.generate_response(
+                messages, response_model=response_model
             )
 
-            text = response.model_dump_json()
+        # Basic sanitization of the response
+        if isinstance(response_text, str):
+            text = "".join(ch for ch in response_text if 0x20 <= ord(ch) < 0x10000)
+        elif hasattr(response_text, "model_dump_json"):  # Handle Pydantic models
+            text = response_text.model_dump_json()
+        else:
+            text = str(response_text)
 
-            # Remove invalid control characters (e.g., null bytes)
-            text = "".join(ch for ch in text if 0x20 <= ord(ch) < 0x10000)
-            if is_json:
+        if is_json:
+            try:
                 return response_model.model_validate_json(text)
-            else:
-                return response_model(text=text)
+            except ValidationError as e:
+                print(f"JSON Validation Error: {e}")
+                print(f"Problematic JSON: {text}")
+                raise
+        else:
+            return response_model(text=text)
 
     def generate_topic(
         self,
-        judge_model: Tuple[Union[OpenAI, Anthropic, Any], str],
+        judge_model_name: str,
         previous_topics: List[str] = [],
     ) -> DebateTopic:
-        client, model = judge_model
         prompt = f"""Generate a balanced, thoughtful debate topic that has clear pro and con positions.
         The topic should be nuanced enough for meaningful discussion but not overly controversial.
-        
+
         Ensure that the debate topic is different from the following previous topics:
          {', '.join(previous_topics)}
 
@@ -267,25 +256,24 @@ class DebateArena:
         """
 
         return self._create_completion(
-            client, model, [{"role": "user", "content": prompt}], DebateTopic
+            judge_model_name, [{"role": "user", "content": prompt}], DebateTopic
         )
 
     def generate_argument(
         self,
-        model: Tuple[Union[OpenAI, Anthropic, Any], str],
+        model_name: str,
         topic: DebateTopic,
         position: Position,
         previous_arguments: Optional[List[DebateArgument]] = None,
         max_retries=3,
     ) -> DebateArgument:
-        client, model_name = model
         last_argument = previous_arguments[0] if previous_arguments else None
 
         context = f"""Topic: {topic.topic}
         Your position: {position.value}
         Context: {topic.context}
         {'Pro position: ' + topic.pro_position if position == Position.PRO else 'Con position: ' + topic.con_position}
-        
+
         """
         if last_argument:
             context += f"""
@@ -293,7 +281,7 @@ class DebateArena:
          Introduction: {last_argument.introduction}
           Reasoning: {[premise for premise, _ in last_argument.reasoning]}
           Rebuttal: {last_argument.rebuttal}
-        
+
         Craft a detailed and comprehensive argument in support of your position that directly responds to the opposition’s last argument.
         Your argument should be well-reasoned, and follow the required structure, including supporting key points with a chain of reasoning, and anticipating counter arguments to the last point made by your opponent.
         """
@@ -320,7 +308,6 @@ class DebateArena:
         for attempt in range(max_retries):
             try:
                 response = self._create_completion(
-                    client,
                     model_name,
                     [{"role": "user", "content": context}],
                     DebateArgument,
@@ -347,12 +334,11 @@ class DebateArena:
 
     def judge_debate(
         self,
-        judge_model: Tuple[Union[OpenAI, Anthropic, Any], str],
+        judge_model_name: str,
         topic: DebateTopic,
         pro_arguments: List[DebateArgument],
         con_arguments: List[DebateArgument],
     ) -> JudgmentResult:
-        client, model = judge_model
 
         debate_summary = f"""Topic: {topic.topic}
         Context: {topic.context}
@@ -367,11 +353,11 @@ class DebateArena:
         Provide your response in the following JSON format:
         {{
             "pro_claims": [
-                {{"claim": "Claim 1", "reasoning": "Reasoning 1"}}, 
+                {{"claim": "Claim 1", "reasoning": "Reasoning 1"}},
                 {{"claim": "Claim 2", "reasoning": "Reasoning 2"}}, ...
             ],
             "con_claims": [
-                 {{"claim": "Claim 1", "reasoning": "Reasoning 1"}}, 
+                 {{"claim": "Claim 1", "reasoning": "Reasoning 1"}},
                  {{"claim": "Claim 2", "reasoning": "Reasoning 2"}}, ...
             ],
             "pro_rebuttals": ["Rebuttal 1", "Rebuttal 2", ...],
@@ -381,8 +367,7 @@ class DebateArena:
         """
 
         extraction = self._create_completion(
-            client,
-            model,
+            judge_model_name,
             [{"role": "user", "content": debate_summary}],
             JudgmentExtraction,
         )
@@ -432,7 +417,9 @@ class DebateArena:
         """
 
         response = self._create_completion(
-            client, model, [{"role": "user", "content": scoring_prompt}], JudgmentResult
+            judge_model_name,
+            [{"role": "user", "content": scoring_prompt}],
+            JudgmentResult,
         )
 
         # convert to ints incase LLM failed to follow instructions
@@ -448,10 +435,7 @@ class DebateArena:
 
         return response
 
-    def summarize_topic(
-        self, judge_model: Tuple[Union[OpenAI, Anthropic, Any], str], topic: DebateTopic
-    ) -> str:
-        client, model = judge_model
+    def summarize_topic(self, judge_model_name: str, topic: DebateTopic) -> str:
         prompt = f"""Please provide a short, high-level summary of the following debate topic.
 
           Topic: {topic.topic}
@@ -460,8 +444,7 @@ class DebateArena:
           Con Position: {topic.con_position}
           """
         response = self._create_completion(
-            client,
-            model,
+            judge_model_name,
             [{"role": "user", "content": prompt}],
             TextResponse,
             is_json=False,
@@ -488,8 +471,8 @@ class DebateArena:
         judge_type = next(m for m in DebateModel if m not in model_types)
 
         # Get the actual client-model tuples
-        debater_models = [(self.models[model_type]) for model_type in model_types]
-        judge_model = self.models[judge_type]
+        debater_model_names = [model_type.value for model_type in model_types]
+        judge_model_name = judge_type.value
 
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -504,12 +487,12 @@ class DebateArena:
         print(f"Judge: {judge_type}")
 
         # Generate topic using the judge model
-        topic = self.generate_topic(judge_model, previous_topics)
+        topic = self.generate_topic(judge_model_name, previous_topics)
         print(f"\nDebate Topic: {topic.topic}")
         print(f"Context: {topic.context}")
 
         # Generate topic summary for DB storage
-        topic_summary = self.summarize_topic(judge_model, topic)
+        topic_summary = self.summarize_topic(judge_model_name, topic)
 
         # Store the topic and summary
         cursor.execute(
@@ -520,7 +503,7 @@ class DebateArena:
 
         # Randomly assign positions
         positions = random.sample([Position.PRO, Position.CON], 2)
-        debaters = list(zip(debater_models, positions))
+        debaters = list(zip(debater_model_names, positions))
 
         print(f"\n{debaters[0][0]}: {debaters[0][1].value}")
         print(f"{debaters[1][0]}: {debaters[1][1].value}\n")
@@ -539,11 +522,11 @@ class DebateArena:
             else:
                 order = debaters[::-1]
 
-            for model, position in order:
-                print(f"\n{model[0]} ({position.value}) is presenting...")
+            for model_name, position in order:
+                print(f"\n{model_name} ({position.value}) is presenting...")
                 if position == Position.PRO:
                     argument = self.generate_argument(
-                        model,
+                        model_name,
                         topic,
                         position,
                         [last_con_argument] if last_con_argument else None,
@@ -552,7 +535,7 @@ class DebateArena:
                     pro_arguments.append(argument)
                 else:
                     argument = self.generate_argument(
-                        model,
+                        model_name,
                         topic,
                         position,
                         [last_pro_argument] if last_pro_argument else None,
@@ -571,7 +554,7 @@ class DebateArena:
         for model_type in DebateModel:
             print(f"\n{model_type} is judging...")
             judgment = self.judge_debate(
-                self.models[model_type], topic, pro_arguments, con_arguments
+                model_type.value, topic, pro_arguments, con_arguments
             )
             judgments.append(judgment)
 
@@ -733,7 +716,7 @@ class DebateArena:
 
 def run_debates(num_runs=1):
     """Run multiple debate simulations"""
-    arena = DebateArena(gemini_client=gemini_client)
+    arena = DebateArena()
     try:
         for i in range(num_runs):
             print(f"\n----- Debate Run {i+1} -----")
@@ -794,7 +777,7 @@ def run_debates(num_runs=1):
             arena.display_win_loss_table()
 
     finally:
-        del arena.gemini_client
+        pass  # No need to delete clients here as they are managed within the model modules
 
     # Show the ELO rating table after the simulation is complete
     conn = sqlite3.connect(arena.db_path)
