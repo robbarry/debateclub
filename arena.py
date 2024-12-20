@@ -100,6 +100,8 @@ class DebateArena:
                 text = re.sub(
                     r"```(?:json)?\s*(.*)\s*```", r"\1", text, flags=re.DOTALL
                 )
+                # Remove invalid control characters (e.g., null bytes)
+                text = "".join(ch for ch in text if 0x20 <= ord(ch) < 0x10000)
                 return response_model.model_validate_json(text)
             else:
                 raise ValueError(
@@ -107,9 +109,15 @@ class DebateArena:
                 )
         else:
             # Use instructor's patched interface for OpenAI
-            return client.chat.completions.create(
+            response = client.chat.completions.create(
                 model=model, response_model=response_model, messages=messages
             )
+
+            text = response.model_dump_json()
+
+            # Remove invalid control characters (e.g., null bytes)
+            text = "".join(ch for ch in text if 0x20 <= ord(ch) < 0x10000)
+            return response_model.model_validate_json(text)
 
     def generate_topic(
         self, judge_model: Tuple[Union[OpenAI, Anthropic, Any], str]
