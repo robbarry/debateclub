@@ -65,7 +65,7 @@ class TextResponse(BaseModel):
 
 
 class DebateArena:
-    def __init__(self, db_path="debate_arena.db"):
+    def __init__(self, db_path="debate_arena.db", gemini_client=None):
         self.models = {
             DebateModel.ANTHROPIC: (anthropic_client, "claude-3-5-sonnet-20241022"),
             DebateModel.OPENAI: (openai_client, "gpt-4o"),
@@ -73,6 +73,7 @@ class DebateArena:
         }
         self.round_count = 3  # Standard number of debate rounds
         self.db_path = db_path
+        self.gemini_client = gemini_client
         self._init_db()
 
     def _init_db(self):
@@ -129,6 +130,7 @@ class DebateArena:
         model: str,
         messages: List[dict],
         response_model: type,
+        is_json=True,
     ) -> Any:
         """Handle different client interfaces for completion creation"""
         if isinstance(client, Anthropic):
@@ -144,8 +146,10 @@ class DebateArena:
 
             # Remove invalid control characters (e.g., null bytes)
             text = "".join(ch for ch in text if 0x20 <= ord(ch) < 0x10000)
-            return response_model.model_validate_json(text)
-
+            if is_json:
+                return response_model.model_validate_json(text)
+            else:
+                return response_model(text=text)
         elif isinstance(client, genai.GenerativeModel):
             # Handle Gemini's interface
             content = "\n\n".join(msg["content"] for msg in messages)
@@ -159,7 +163,10 @@ class DebateArena:
                 )
                 # Remove invalid control characters (e.g., null bytes)
                 text = "".join(ch for ch in text if 0x20 <= ord(ch) < 0x10000)
-                return response_model.model_validate_json(text)
+                if is_json:
+                    return response_model.model_validate_json(text)
+                else:
+                    return response_model(text=text)
             else:
                 raise ValueError(
                     f"Gemini Response did not include a response text: {response}"
@@ -174,7 +181,10 @@ class DebateArena:
 
             # Remove invalid control characters (e.g., null bytes)
             text = "".join(ch for ch in text if 0x20 <= ord(ch) < 0x10000)
-            return response_model.model_validate_json(text)
+            if is_json:
+                return response_model.model_validate_json(text)
+            else:
+                return response_model(text=text)
 
     def generate_topic(
         self,
@@ -209,15 +219,29 @@ class DebateArena:
         previous_arguments: Optional[List[DebateArgument]] = None,
     ) -> DebateArgument:
         client, model_name = model
+        last_argument = previous_arguments[0] if previous_arguments else None
 
         context = f"""Topic: {topic.topic}
         Your position: {position.value}
         Context: {topic.context}
         {'Pro position: ' + topic.pro_position if position == Position.PRO else 'Con position: ' + topic.con_position}
         
+        """
+        if last_argument:
+            context += f"""
+        The opposing side's last argument was:
+        {last_argument.argument}
+        
+        Craft a detailed and comprehensive argument in support of your position that directly responds to the opposition’s last argument.
+        Your argument should be well-reasoned, and include supporting key points, and anticipated counter arguments to the last point made by your opponent.
+        """
+        else:
+            context += """
         Provide a detailed and comprehensive argument in support of your position.
         Your argument should be well-reasoned, and include supporting key points, and anticipated counter arguments to your position.
-        
+        """
+
+        context += """
         Provide your response in the following format:
         {{
             "position": "{position.value}",
@@ -226,15 +250,16 @@ class DebateArena:
             "counter_arguments": ["Anticipated counter 1", "Anticipated counter 2"]
         }}
         """
-        if previous_arguments:
-            context += "\nPrevious arguments:\n" + "\n".join(
-                f"Round {i+1}: {arg.argument}"
-                for i, arg in enumerate(previous_arguments)
-            )
 
-        return self._create_completion(
-            client, model_name, [{"role": "user", "content": context}], DebateArgument
+        response = self._create_completion(
+            client,
+            model_name,
+            [{"role": "user", "content": context}],
+            DebateArgument,  # Changed BaseModel to DebateArgument
+            is_json=True,
         )
+
+        return response
 
     def judge_debate(
         self,
@@ -258,26 +283,39 @@ class DebateArena:
         {{
             "winner": "pro or con",
             "pro_score": {{
-                "logic_score": 1-10,
-                "evidence_score": 1-10,
-                "rebuttal_score": 1-10,
-                "overall_score": 1-10,
+                "logic_score": (integer between 1-10),
+                "evidence_score": (integer between 1-10),
+                "rebuttal_score": (integer between 1-10),
+                "overall_score": (integer between 1-10),
                 "reasoning": "Explanation of scores"
             }},
             "con_score": {{
-                "logic_score": 1-10,
-                "evidence_score": 1-10,
-                "rebuttal_score": 1-10,
-                "overall_score": 1-10,
+                "logic_score": (integer between 1-10),
+                "evidence_score": (integer between 1-10),
+                "rebuttal_score": (integer between 1-10),
+                 "overall_score": (integer between 1-10),
                 "reasoning": "Explanation of scores"
             }},
             "explanation": "Detailed explanation of your decision"
         }}
         """
 
-        return self._create_completion(
+        response = self._create_completion(
             client, model, [{"role": "user", "content": debate_summary}], JudgmentResult
         )
+
+        # convert to ints incase LLM failed to follow instructions
+        response.pro_score.logic_score = int(response.pro_score.logic_score)
+        response.pro_score.evidence_score = int(response.pro_score.evidence_score)
+        response.pro_score.rebuttal_score = int(response.pro_score.rebuttal_score)
+        response.pro_score.overall_score = int(response.pro_score.overall_score)
+
+        response.con_score.logic_score = int(response.con_score.logic_score)
+        response.con_score.evidence_score = int(response.con_score.evidence_score)
+        response.con_score.rebuttal_score = int(response.con_score.rebuttal_score)
+        response.con_score.overall_score = int(response.con_score.overall_score)
+
+        return response
 
     def summarize_topic(
         self, judge_model: Tuple[Union[OpenAI, Anthropic, Any], str], topic: DebateTopic
@@ -291,7 +329,11 @@ class DebateArena:
           Con Position: {topic.con_position}
           """
         response = self._create_completion(
-            client, model, [{"role": "user", "content": prompt}], TextResponse
+            client,
+            model,
+            [{"role": "user", "content": prompt}],
+            TextResponse,
+            is_json=False,
         )
         return response.text
 
@@ -348,6 +390,8 @@ class DebateArena:
         # Run debate rounds
         pro_arguments = []
         con_arguments = []
+        last_pro_argument = None
+        last_con_argument = None
 
         for round_num in range(self.round_count):
             print(f"\nRound {round_num + 1}:")
@@ -359,20 +403,26 @@ class DebateArena:
 
             for model, position in order:
                 print(f"\n{model[0]} ({position.value}) is presenting...")
-                argument = self.generate_argument(
-                    model,
-                    topic,
-                    position,
-                    pro_arguments if position == Position.PRO else con_arguments,
-                )
-
-                print(f"Argument: {argument.argument}")
-                print("Key points:", ", ".join(argument.key_points))
-
                 if position == Position.PRO:
+                    argument = self.generate_argument(
+                        model,
+                        topic,
+                        position,
+                        [last_con_argument] if last_con_argument else None,
+                    )
+                    last_pro_argument = argument
                     pro_arguments.append(argument)
                 else:
+                    argument = self.generate_argument(
+                        model,
+                        topic,
+                        position,
+                        [last_pro_argument] if last_pro_argument else None,
+                    )
+                    last_con_argument = argument
                     con_arguments.append(argument)
+                print(f"Argument: {argument.argument}")
+                print("Key points:", ", ".join(argument.key_points))
 
         # Get judgments from all three models
         print("\nJudges are evaluating the debate...")
@@ -489,62 +539,63 @@ class DebateArena:
 
 def run_debates(num_runs=1):
     """Run multiple debate simulations"""
-    arena = DebateArena()
-    for i in range(num_runs):
-        print(f"\n----- Debate Run {i+1} -----")
-        judgments, topic = arena.run_debate()
-        winner = arena.determine_winner(judgments)
+    arena = DebateArena(gemini_client=gemini_client)
+    try:
+        for i in range(num_runs):
+            print(f"\n----- Debate Run {i+1} -----")
+            judgments, topic = arena.run_debate()
+            winner = arena.determine_winner(judgments)
 
-        # Get a summary from the LLM and save it to the DB
-        conn = sqlite3.connect(arena.db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT summary FROM topics WHERE topic = ?", (topic.topic,))
-        topic_summary = cursor.fetchone()[0]
+            # Get a summary from the LLM and save it to the DB
+            conn = sqlite3.connect(arena.db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT summary FROM topics WHERE topic = ?", (topic.topic,))
+            topic_summary = cursor.fetchone()[0]
 
-        arena.record_debate(
-            topic,
-            topic_summary,
-            [
-                a
-                for a in judgments[0].model_dump()["pro_score"].values()
-                if type(a) is list
-            ],
-            [
-                a
-                for a in judgments[0].model_dump()["con_score"].values()
-                if type(a) is list
-            ],
-            judgments,
-            winner,
-        )
+            arena.record_debate(
+                topic,
+                topic_summary,
+                [
+                    a
+                    for a in judgments[0].model_dump()["pro_score"].values()
+                    if type(a) is list
+                ],
+                [
+                    a
+                    for a in judgments[0].model_dump()["con_score"].values()
+                    if type(a) is list
+                ],
+                judgments,
+                winner,
+            )
 
-        # get models
-        model_types = random.sample(list(DebateModel), 2)
+            # get models
+            model_types = random.sample(list(DebateModel), 2)
 
-        if winner == Position.PRO:
-            arena.calculate_elo(model_types[0], model_types[1])
-        elif winner == Position.CON:
-            arena.calculate_elo(model_types[1], model_types[0])
-
-        del gemini_client
-        print(f"\nDebate Winner: {winner.value if winner else 'Tie'}")
-        for i, judgment in enumerate(judgments):
-            print(f"\nJudge {i+1} Decision:")
-            print(f"Winner: {judgment.winner.value if judgment.winner else 'Tie'}")
-            print(f"Explanation: {judgment.explanation}")
-            print("\nPro Scores:")
-            print(f"Logic: {judgment.pro_score.logic_score}")
-            print(f"Evidence: {judgment.pro_score.evidence_score}")
-            print(f"Rebuttal: {judgment.pro_score.rebuttal_score}")
-            print(f"Overall: {judgment.pro_score.overall_score}")
-            print(f"Reasoning: {judgment.pro_score.reasoning}")
-            print("\nCon Scores:")
-            print(f"Logic: {judgment.con_score.logic_score}")
-            print(f"Evidence: {judgment.con_score.evidence_score}")
-            print(f"Rebuttal: {judgment.con_score.rebuttal_score}")
-            print(f"Overall: {judgment.con_score.overall_score}")
-            print(f"Reasoning: {judgment.con_score.reasoning}")
-        time.sleep(0.1)  # small delay to allow the resources to clean up
+            if winner == Position.PRO:
+                arena.calculate_elo(model_types[0], model_types[1])
+            elif winner == Position.CON:
+                arena.calculate_elo(model_types[1], model_types[0])
+            print(f"\nDebate Winner: {winner.value if winner else 'Tie'}")
+            for i, judgment in enumerate(judgments):
+                print(f"\nJudge {i+1} Decision:")
+                print(f"Winner: {judgment.winner.value if judgment.winner else 'Tie'}")
+                print(f"Explanation: {judgment.explanation}")
+                print("\nPro Scores:")
+                print(f"Logic: {judgment.pro_score.logic_score}")
+                print(f"Evidence: {judgment.pro_score.evidence_score}")
+                print(f"Rebuttal: {judgment.pro_score.rebuttal_score}")
+                print(f"Overall: {judgment.pro_score.overall_score}")
+                print(f"Reasoning: {judgment.pro_score.reasoning}")
+                print("\nCon Scores:")
+                print(f"Logic: {judgment.con_score.logic_score}")
+                print(f"Evidence: {judgment.con_score.evidence_score}")
+                print(f"Rebuttal: {judgment.con_score.rebuttal_score}")
+                print(f"Overall: {judgment.con_score.overall_score}")
+                print(f"Reasoning: {judgment.con_score.reasoning}")
+            time.sleep(0.1)  # small delay to allow the resources to clean up
+    finally:
+        del arena.gemini_client
 
     # Show the ELO rating table after the simulation is complete
     conn = sqlite3.connect(arena.db_path)
