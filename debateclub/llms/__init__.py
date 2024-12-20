@@ -6,16 +6,7 @@ from pydantic import BaseModel
 
 
 class LLMModel(Protocol):
-    """Protocol defining the interface for LLM models.
-
-    All LLM implementations should follow this protocol to ensure consistent
-    behavior across different providers. This protocol assumes the use of
-    Instructor for handling structured outputs.
-
-    Methods:
-        model_name: Returns the identifier for this model
-        generate_response: Generates a response from the model, optionally parsed into a Pydantic model
-    """
+    """Protocol defining the interface for LLM models."""
 
     @staticmethod
     def model_name() -> str:
@@ -28,37 +19,22 @@ class LLMModel(Protocol):
         response_model: Optional[Type[BaseModel]] = None,
         **kwargs,
     ) -> Any:
-        """Generates a response from the model.
-
-        Args:
-            messages: List of message dictionaries with 'role' and 'content'
-            response_model: Optional Pydantic model to parse the response into
-            **kwargs: Additional arguments passed to the underlying API
-
-        Returns:
-            If response_model is provided, returns an instance of that model.
-            Otherwise, returns the raw text response.
-        """
+        """Generates a response from the model."""
         ...
 
 
-def load_all_models() -> Dict[str, LLMModel]:
-    """Loads and instantiates all LLM model implementations.
-
-    Note: Will print debug information about loaded models and any errors.
-
-    Dynamically loads all Python files in the llms directory (except __init__.py)
-    and instantiates any classes that implement the LLMModel protocol.
-
-    Returns:
-        Dictionary mapping model names to model instances.
-    """
+def load_all_models() -> Dict[str, Any]:
+    """Loads and instantiates all LLM model implementations."""
     models = {}
     llms_dir = os.path.dirname(__file__)
 
     print("\nLoading LLM models:")
     for filename in os.listdir(llms_dir):
-        if filename.endswith(".py") and filename != "__init__.py":
+        if (
+            filename.endswith(".py")
+            and filename != "__init__.py"
+            and filename != "models_manager.py"
+        ):
             module_name = f"debateclub.llms.{filename[:-3]}"
             spec = importlib.util.spec_from_file_location(
                 module_name, os.path.join(llms_dir, filename)
@@ -71,6 +47,7 @@ def load_all_models() -> Dict[str, LLMModel]:
                     inspect.isclass(obj)
                     and hasattr(obj, "model_name")
                     and hasattr(obj, "generate_response")
+                    and not isinstance(obj, Protocol)
                 ):
                     try:
                         model_instance = obj()

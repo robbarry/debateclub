@@ -1,6 +1,6 @@
 import random
 from typing import List, Tuple, Optional
-from prettytable import PrettyTable
+from tabulate import tabulate
 import time
 
 from debateclub.models import (
@@ -22,6 +22,119 @@ class DebateArena:
         self.models = get_models()
         self.round_count = 3
         self.db_path = db_path
+        self.table_width = 120  # Maximum width for tables
+
+    def display_round(
+        self, round_num: int, debater: str, position: Position, argument: DebateArgument
+    ):
+        """Display a single round's argument in tabulated format"""
+        # Create header for the round
+        print(f"\nRound {round_num} - {debater} ({position.value})")
+
+        # Format introduction
+        intro_table = [[argument.introduction]]
+        print(
+            tabulate(intro_table, tablefmt="grid", maxcolwidths=[self.table_width - 4])
+        )
+
+        # Format reasoning
+        reasoning_data = []
+        for i, premise in enumerate(argument.reasoning, 1):
+            reasoning_data.append([f"Point {i}", premise.premise, premise.reasoning])
+
+        print(
+            tabulate(
+                reasoning_data,
+                headers=["#", "Premise", "Reasoning"],
+                tablefmt="grid",
+                maxcolwidths=[
+                    6,
+                    (self.table_width - 10) // 2,
+                    (self.table_width - 10) // 2,
+                ],
+            )
+        )
+
+        # Format rebuttal
+        rebuttal_table = [[argument.rebuttal]]
+        print("\nRebuttal:")
+        print(
+            tabulate(
+                rebuttal_table, tablefmt="grid", maxcolwidths=[self.table_width - 4]
+            )
+        )
+
+    def display_judgment(self, judge_num: int, judgment: JudgmentResult):
+        """Display a single judgment in tabulated format"""
+        print(f"\nJudge {judge_num} Decision:")
+
+        # Winner and explanation
+        decision_data = [
+            ["Winner", judgment.winner.value if judgment.winner else "Tie"],
+            ["Explanation", judgment.explanation],
+        ]
+        print(
+            tabulate(
+                decision_data, tablefmt="grid", maxcolwidths=[15, self.table_width - 19]
+            )
+        )
+
+        # Scores table
+        scores_data = [
+            ["Metric", "Pro Score", "Con Score"],
+            ["Logic", judgment.pro_score.logic_score, judgment.con_score.logic_score],
+            [
+                "Evidence",
+                judgment.pro_score.evidence_score,
+                judgment.con_score.evidence_score,
+            ],
+            [
+                "Rebuttal",
+                judgment.pro_score.rebuttal_score,
+                judgment.con_score.rebuttal_score,
+            ],
+            [
+                "Overall",
+                judgment.pro_score.overall_score,
+                judgment.con_score.overall_score,
+            ],
+        ]
+        print(tabulate(scores_data, headers="firstrow", tablefmt="grid"))
+
+        # Reasoning table
+        reasoning_data = [
+            ["Side", "Reasoning"],
+            ["Pro", judgment.pro_score.reasoning],
+            ["Con", judgment.con_score.reasoning],
+        ]
+        print(
+            tabulate(
+                reasoning_data,
+                headers="firstrow",
+                tablefmt="grid",
+                maxcolwidths=[10, self.table_width - 14],
+            )
+        )
+
+    def display_win_loss_table(self):
+        """Display win/loss table from database."""
+        rows = db.get_win_loss_data()
+        print("\nWin/Loss Table:")
+        print(
+            tabulate(
+                rows,
+                headers=[
+                    "Topic",
+                    "Model 1",
+                    "Model 2",
+                    "Winner",
+                    "Model 1 ELO",
+                    "Model 2 ELO",
+                ],
+                tablefmt="grid",
+                maxcolwidths=[30, 15, 15, 10, 12, 12],
+            )
+        )
 
     def generate_topic(
         self,
@@ -57,35 +170,45 @@ class DebateArena:
         # Select model types first
         selected_models = random.sample(list(self.models.values()), 2)
         judge_model = next(m for m in self.models.values() if m not in selected_models)
-
-        # Get the actual client-model tuples
         debater_models = [model for model in selected_models]
 
-        # Retrieve previous topics from the database
+        # Get previous topics
         previous_topics = db.get_previous_topics()
 
-        print("Starting debate...")
-        print(f"Debater 1: {selected_models[0].model_name()}")
-        print(f"Debater 2: {selected_models[1].model_name()}")
-        print(f"Judge: {judge_model.model_name()}")
+        # Display debate setup
+        setup_data = [
+            ["Role", "Model"],
+            ["Debater 1", selected_models[0].model_name()],
+            ["Debater 2", selected_models[1].model_name()],
+            ["Judge", judge_model.model_name()],
+        ]
+        print(tabulate(setup_data, headers="firstrow", tablefmt="grid"))
 
         # Generate topic using the judge model
         topic = self.generate_topic(judge_model.model_name(), previous_topics)
-        print(f"\nDebate Topic: {topic.topic}")
-        print(f"Context: {topic.context}")
+
+        # Display topic information
+        topic_data = [["Topic", topic.topic], ["Context", topic.context]]
+        print(
+            tabulate(
+                topic_data, tablefmt="grid", maxcolwidths=[15, self.table_width - 19]
+            )
+        )
 
         # Generate topic summary for DB storage
         topic_summary = judging.summarize_topic(judge_model.model_name(), topic)
-
-        # Store the topic and summary
         db.insert_topic_data(topic.topic, topic_summary)
 
         # Randomly assign positions
         positions = random.sample([Position.PRO, Position.CON], 2)
         debaters = list(zip(debater_models, positions))
 
-        print(f"\n{debaters[0][0].model_name()}: {debaters[0][1].value}")
-        print(f"{debaters[1][0].model_name()}: {debaters[1][1].value}\n")
+        positions_data = [
+            ["Model", "Position"],
+            [debaters[0][0].model_name(), debaters[0][1].value],
+            [debaters[1][0].model_name(), debaters[1][1].value],
+        ]
+        print(tabulate(positions_data, headers="firstrow", tablefmt="grid"))
 
         # Run debate rounds
         pro_arguments = []
@@ -94,49 +217,42 @@ class DebateArena:
         last_con_argument = None
 
         for round_num in range(self.round_count):
-            print(f"\nRound {round_num + 1}:")
-            # Alternate who goes first each round
             if round_num % 2 == 0:
                 debater_order = debaters
             else:
                 debater_order = debaters[::-1]
 
             for model, position in debater_order:
-                print(f"\n{model.model_name()} ({position.value}) is presenting...")
+                argument = argumentation.generate_argument(
+                    model.model_name(),
+                    topic,
+                    position,
+                    (
+                        [last_con_argument]
+                        if last_con_argument and position == Position.PRO
+                        else [last_pro_argument] if last_pro_argument else None
+                    ),
+                )
+
                 if position == Position.PRO:
-                    argument = argumentation.generate_argument(
-                        model.model_name(),
-                        topic,
-                        position,
-                        [last_con_argument] if last_con_argument else None,
-                    )
                     last_pro_argument = argument
                     pro_arguments.append(argument)
                 else:
-                    argument = argumentation.generate_argument(
-                        model.model_name(),
-                        topic,
-                        position,
-                        [last_pro_argument] if last_pro_argument else None,
-                    )
                     last_con_argument = argument
                     con_arguments.append(argument)
 
-                print(f"Argument: \n{argument.introduction}")
-                print("Reasoning:")
-                for i, premise in enumerate(argument.reasoning):
-                    print(
-                        f"   {i+1}. {premise.premise} (Reasoning: {premise.reasoning})"
-                    )
-                print(f"Rebuttal: {argument.rebuttal}\n")
-        # Get judgments from all three models
+                self.display_round(
+                    round_num + 1, model.model_name(), position, argument
+                )
+
+        # Get judgments
         print("\nJudges are evaluating the debate...")
         judgments = []
-        for model in self.models.values():
-            print(f"\n{model.model_name()} is judging...")
+        for i, model in enumerate(self.models.values(), 1):
             judgment = judging.judge_debate(
                 model.model_name(), topic, pro_arguments, con_arguments
             )
+            self.display_judgment(i, judgment)
             judgments.append(judgment)
 
         return tuple(judgments), topic
@@ -206,23 +322,6 @@ class DebateArena:
             model1_elo,
             model2_elo,
         )
-
-    def display_win_loss_table(self):
-        """Display win/loss table from database."""
-        rows = db.get_win_loss_data()
-        table = PrettyTable()
-        table.field_names = [
-            "Topic",
-            "Model 1",
-            "Model 2",
-            "Winner",
-            "Model 1 ELO",
-            "Model 2 ELO",
-        ]
-        for row in rows:
-            table.add_row(row)
-        print("\nWin/Loss Table:")
-        print(table)
 
 
 def run_debates(num_runs=1):
