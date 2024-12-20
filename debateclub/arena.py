@@ -1,12 +1,11 @@
 import os
-import random
-from typing import List, Tuple, Optional, Union, Any
+from typing import List, Tuple, Optional, Union, Any, Dict
 from enum import Enum
 import instructor
 from openai import OpenAI
 from anthropic import Anthropic
 import google.generativeai as genai
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import re
 import time
 import sqlite3
@@ -14,7 +13,7 @@ import json
 from math import pow
 from prettytable import PrettyTable
 from pydantic import ValidationError
-
+import random
 
 # Initialize the clients with instructor
 openai_client = instructor.patch(OpenAI())
@@ -44,8 +43,52 @@ class DebateTopic(BaseModel):
 class DebateArgument(BaseModel):
     position: Position
     introduction: str
-    premises: List[Tuple[str, str]]  # Premise and evidence
+    reasoning: List[Dict[str, str]] = Field(
+        ...,
+        json_schema_extra={
+            "items": {
+                "type": "object",
+                "properties": {
+                    "premise": {"type": "string"},
+                    "reasoning": {"type": "string"},
+                },
+                "required": ["premise", "reasoning"],
+            }
+        },
+    )
     rebuttal: str
+
+
+class JudgmentExtraction(BaseModel):
+    pro_claims: List[Tuple[str, str]] = Field(
+        ...,
+        json_schema_extra={
+            "items": {
+                "type": "object",
+                "properties": {
+                    "claim": {"type": "string"},
+                    "reasoning": {"type": "string"},
+                },
+                "required": ["claim", "reasoning"],
+            }
+        },
+    )
+    con_claims: List[Tuple[str, str]] = Field(
+        ...,
+        json_schema_extra={
+            "items": {
+                "type": "object",
+                "properties": {
+                    "claim": {"type": "string"},
+                    "reasoning": {"type": "string"},
+                },
+                "required": ["claim", "reasoning"],
+            }
+        },
+    )
+    pro_rebuttals: List[str]
+    con_rebuttals: List[str]
+    logical_fallacies: List[str]
 
 
 class JudgmentScore(BaseModel):
@@ -248,16 +291,16 @@ class DebateArena:
             context += f"""
         The opposing side's last argument was:
          Introduction: {last_argument.introduction}
-          Premises: {[premise for premise, _ in last_argument.premises]}
+          Reasoning: {[premise for premise, _ in last_argument.reasoning]}
           Rebuttal: {last_argument.rebuttal}
         
         Craft a detailed and comprehensive argument in support of your position that directly responds to the opposition’s last argument.
-        Your argument should be well-reasoned, and follow the required structure, including supporting key points with evidence, and anticipating counter arguments to the last point made by your opponent.
+        Your argument should be well-reasoned, and follow the required structure, including supporting key points with a chain of reasoning, and anticipating counter arguments to the last point made by your opponent.
         """
         else:
             context += """
          Provide a detailed and comprehensive argument in support of your position.
-        Your argument should be well-reasoned and should follow the required structure, including supporting key points with evidence, and anticipating counter arguments to your position.
+        Your argument should be well-reasoned and should follow the required structure, including supporting key points with a chain of reasoning, and anticipating counter arguments to your position.
         """
 
         context += f"""
@@ -265,10 +308,10 @@ class DebateArena:
         {{
             "position": "{position.value}",
             "introduction": "A concise 1-2 sentence introduction to your argument",
-             "premises": [
-                ["Premise 1", "Evidence/Reference for Premise 1"],
-                ["Premise 2", "Evidence/Reference for Premise 2"],
-                ["Premise 3", "Evidence/Reference for Premise 3"]
+             "reasoning": [
+                {{"premise": "Premise 1", "reasoning": "Reasoning chain for Premise 1"}},
+                {{"premise": "Premise 2", "reasoning": "Reasoning chain for Premise 2"}},
+                {{"premise": "Premise 3", "reasoning": "Reasoning chain for Premise 3"}}
                 ],
             "rebuttal": "A direct rebuttal to the opponent's previous key points"
         }}
@@ -286,6 +329,10 @@ class DebateArena:
                 response.position = (
                     position  # overwrite the LLM response as it could be wrong still
                 )
+                # transform dict to tuple.
+                response.reasoning = [
+                    (item["premise"], item["reasoning"]) for item in response.reasoning
+                ]
                 return response
             except ValidationError as e:
                 if attempt < max_retries - 1:  # Don't wait on the last attempt
@@ -309,14 +356,61 @@ class DebateArena:
 
         debate_summary = f"""Topic: {topic.topic}
         Context: {topic.context}
-        
+
         Pro Position Arguments:
         {self._format_arguments(pro_arguments)}
-        
+
         Con Position Arguments:
         {self._format_arguments(con_arguments)}
-        
-        Judge this debate and provide your judgment in the following format:
+
+        Please extract the claims and supporting reasoning from each side, and identify any logical fallacies present in the debate.
+        Provide your response in the following JSON format:
+        {{
+            "pro_claims": [
+                {{"claim": "Claim 1", "reasoning": "Reasoning 1"}}, 
+                {{"claim": "Claim 2", "reasoning": "Reasoning 2"}}, ...
+            ],
+            "con_claims": [
+                 {{"claim": "Claim 1", "reasoning": "Reasoning 1"}}, 
+                 {{"claim": "Claim 2", "reasoning": "Reasoning 2"}}, ...
+            ],
+            "pro_rebuttals": ["Rebuttal 1", "Rebuttal 2", ...],
+            "con_rebuttals": ["Rebuttal 1", "Rebuttal 2", ...],
+            "logical_fallacies": ["Fallacy 1", "Fallacy 2", ...]
+        }}
+        """
+
+        extraction = self._create_completion(
+            client,
+            model,
+            [{"role": "user", "content": debate_summary}],
+            JudgmentExtraction,
+        )
+        # transform dict to tuple.
+        extraction.pro_claims = [
+            (item["claim"], item["reasoning"]) for item in extraction.pro_claims
+        ]
+        extraction.con_claims = [
+            (item["claim"], item["reasoning"]) for item in extraction.con_claims
+        ]
+        scoring_prompt = f"""
+        Based on the extracted information:
+
+        Topic: {topic.topic}
+        Context: {topic.context}
+
+        Pro Claims: {extraction.pro_claims}
+        Con Claims: {extraction.con_claims}
+        Pro Rebuttals: {extraction.pro_rebuttals}
+        Con Rebuttals: {extraction.con_rebuttals}
+        Logical Fallacies: {extraction.logical_fallacies}
+
+        Judge the debate based on the extracted information, following these steps:
+            1. Identify explicit logical fallacies, if any, and deduct points for each.
+            2. Assess the quality and completeness of the reasoning chains provided by each side.
+            3. Assess how directly each side addressed the opponent's key points in their rebuttal.
+
+        Provide your judgment in the following format:
         {{
             "winner": "pro or con",
             "pro_score": {{
@@ -330,7 +424,7 @@ class DebateArena:
                 "logic_score": (integer between 1-10),
                 "evidence_score": (integer between 1-10),
                 "rebuttal_score": (integer between 1-10),
-                 "overall_score": (integer between 1-10),
+                "overall_score": (integer between 1-10),
                 "reasoning": "Explanation of scores"
             }},
             "explanation": "Detailed explanation of your decision"
@@ -338,7 +432,7 @@ class DebateArena:
         """
 
         response = self._create_completion(
-            client, model, [{"role": "user", "content": debate_summary}], JudgmentResult
+            client, model, [{"role": "user", "content": scoring_prompt}], JudgmentResult
         )
 
         # convert to ints incase LLM failed to follow instructions
@@ -379,9 +473,9 @@ class DebateArena:
         for i, arg in enumerate(arguments):
             formatted_arg = f"Round {i + 1}:\n"
             formatted_arg += f"  Introduction: {arg.introduction}\n"
-            formatted_arg += "  Premises:\n"
-            for j, (premise, evidence) in enumerate(arg.premises):
-                formatted_arg += f"    {j+1}. {premise} (Evidence: {evidence})\n"
+            formatted_arg += "  Reasoning:\n"
+            for j, (premise, reasoning) in enumerate(arg.reasoning):
+                formatted_arg += f"    {j+1}. {premise} (Reasoning: {reasoning})\n"
             formatted_arg += f"  Rebuttal: {arg.rebuttal}\n"
             formatted_args.append(formatted_arg)
         return "\n".join(formatted_args)
@@ -467,9 +561,9 @@ class DebateArena:
                     con_arguments.append(argument)
 
                 print(f"Argument: \n{argument.introduction}")
-                print("Premises:")
-                for i, (premise, evidence) in enumerate(argument.premises):
-                    print(f"   {i+1}. {premise} (Evidence: {evidence})")
+                print("Reasoning:")
+                for i, (premise, reasoning) in enumerate(argument.reasoning):
+                    print(f"   {i+1}. {premise} (Reasoning: {reasoning})")
                 print(f"Rebuttal: {argument.rebuttal}\n")
         # Get judgments from all three models
         print("\nJudges are evaluating the debate...")
